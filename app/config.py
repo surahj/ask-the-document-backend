@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     max_file_size: int = 50 * 1024 * 1024  # 50MB in bytes
     allowed_extensions: list = [".pdf", ".docx", ".txt", ".md"]
 
+    # Cloudinary Configuration
+    cloudinary_cloud_name: Optional[str] = None
+    cloudinary_api_key: Optional[str] = None
+    cloudinary_api_secret: Optional[str] = None
+    cloudinary_folder: str = "documind"  # Folder in Cloudinary
+    use_cloudinary: bool = False  # Toggle between local and cloud storage
+
     # AI Services
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4"

@@ -4,6 +4,8 @@ Document processing service for DocuMind AI Assistant with vector embeddings
 
 import os
 import re
+import tempfile
+import requests
 from typing import List, Dict, Any
 from pathlib import Path
 import PyPDF2
@@ -13,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import Document, DocumentChunk
 from app.services.embedding_service import EmbeddingService
+from app.services.cloudinary_service import CloudinaryService
 
 
 class DocumentProcessor:
@@ -25,6 +28,7 @@ class DocumentProcessor:
         self.chunk_overlap = settings.chunk_overlap
         self.max_chunks = settings.max_chunks_per_document
         self.embedding_service = embedding_service or EmbeddingService()
+        self.cloudinary_service = CloudinaryService()
 
     def validate_document(self, file_path: str) -> Dict[str, Any]:
         """Validate document file"""
@@ -52,6 +56,28 @@ class DocumentProcessor:
         except Exception as e:
             return {"error": f"Validation error: {str(e)}"}
 
+    def download_from_cloudinary(
+        self, cloudinary_url: str, file_type: str
+    ) -> Dict[str, Any]:
+        """Download file from Cloudinary URL for processing"""
+        try:
+            # Download file from Cloudinary
+            response = requests.get(cloudinary_url, stream=True)
+            response.raise_for_status()
+
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(
+                delete=False, suffix=file_type
+            ) as temp_file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    temp_file.write(chunk)
+                temp_file_path = temp_file.name
+
+            return {"success": True, "temp_file_path": temp_file_path}
+
+        except Exception as e:
+            return {"error": f"Failed to download from Cloudinary: {str(e)}"}
+
     def extract_text(self, file_path: str) -> Dict[str, Any]:
         """Extract text from document"""
         try:
@@ -68,6 +94,30 @@ class DocumentProcessor:
 
         except Exception as e:
             return {"error": f"Text extraction error: {str(e)}"}
+
+    def extract_text_from_cloudinary(
+        self, cloudinary_url: str, file_type: str
+    ) -> Dict[str, Any]:
+        """Extract text from document stored in Cloudinary"""
+        try:
+            # Download file from Cloudinary
+            download_result = self.download_from_cloudinary(cloudinary_url, file_type)
+            if "error" in download_result:
+                return download_result
+
+            temp_file_path = download_result["temp_file_path"]
+
+            try:
+                # Extract text from the temporary file
+                extraction_result = self.extract_text(temp_file_path)
+                return extraction_result
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)
+
+        except Exception as e:
+            return {"error": f"Text extraction from Cloudinary error: {str(e)}"}
 
     def _extract_pdf_text(self, file_path: str) -> Dict[str, Any]:
         """Extract text from PDF file"""
@@ -278,6 +328,10 @@ class DocumentProcessor:
                     # Store embedding directly as list for PostgreSQL VECTOR type
                     chunk.embedding = embedding
                     chunks_created += 1
+                else:
+                    print(
+                        f"Warning: Failed to create embedding for chunk {chunk_data['chunk_index']}"
+                    )
 
             # Update document status
             document.status = "processed"
@@ -294,6 +348,90 @@ class DocumentProcessor:
         except Exception as e:
             db.rollback()
             return {"error": f"Error processing and storing document: {str(e)}"}
+
+    def process_and_store_document_from_cloudinary(
+        self,
+        cloudinary_url: str,
+        cloudinary_public_id: str,
+        user_id: int,
+        filename: str,
+        file_size: int,
+        file_type: str,
+        db: Session,
+    ) -> Dict[str, Any]:
+        """Process document from Cloudinary URL and store with embeddings in database"""
+        try:
+            # Extract text from Cloudinary
+            extraction = self.extract_text_from_cloudinary(cloudinary_url, file_type)
+            if "error" in extraction:
+                return extraction
+
+            # Chunk text
+            chunks = self.chunk_text(extraction["text"])
+            if not chunks or "error" in chunks[0]:
+                return {"error": "Failed to chunk document"}
+
+            # Create document record
+            document = Document(
+                user_id=user_id,
+                filename=filename,
+                cloudinary_url=cloudinary_url,
+                cloudinary_public_id=cloudinary_public_id,
+                file_size=file_size,
+                file_type=file_type,
+                status="processing",
+            )
+            db.add(document)
+            db.flush()  # Get the document ID
+
+            # Create chunks and embeddings
+            chunks_created = 0
+            for chunk_data in chunks:
+                # Create chunk record
+                chunk = DocumentChunk(
+                    document_id=document.id,
+                    chunk_index=chunk_data["chunk_index"],
+                    content=chunk_data["content"],
+                    start_position=chunk_data["start_position"],
+                    end_position=chunk_data["end_position"],
+                )
+                db.add(chunk)
+                db.flush()  # Get the chunk ID
+
+                # Create and store embedding
+                embedding = self.embedding_service.create_embedding(
+                    chunk_data["content"]
+                )
+                if embedding:
+                    # Store embedding directly as list for PostgreSQL VECTOR type
+                    chunk.embedding = embedding
+                    chunks_created += 1
+                else:
+                    print(
+                        f"Warning: Failed to create embedding for chunk {chunk_data['chunk_index']}"
+                    )
+
+            # Update document status
+            document.status = "processed"
+            db.commit()
+
+            return {
+                "document_id": document.id,
+                "chunks_created": chunks_created,
+                "total_chunks": len(chunks),
+                "file_info": {
+                    "file_size": file_size,
+                    "file_type": file_type,
+                    "total_chunks": len(chunks),
+                },
+                "status": "processed",
+            }
+
+        except Exception as e:
+            db.rollback()
+            return {
+                "error": f"Error processing and storing document from Cloudinary: {str(e)}"
+            }
 
     def delete_document_chunks(self, document_id: int, db: Session) -> bool:
         """Delete all chunks and embeddings for a document"""

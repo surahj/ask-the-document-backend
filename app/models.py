@@ -47,7 +47,11 @@ class Document(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     filename = Column(String(255), nullable=False)
-    file_path = Column(String(500), nullable=False)
+    file_path = Column(
+        String(500), nullable=True
+    )  # Made nullable for Cloudinary compatibility
+    cloudinary_url = Column(String(1000), nullable=True)  # Cloudinary secure URL
+    cloudinary_public_id = Column(String(255), nullable=True)  # Cloudinary public ID
     file_size = Column(Integer, nullable=False)
     file_type = Column(String(10), nullable=False)
     status = Column(

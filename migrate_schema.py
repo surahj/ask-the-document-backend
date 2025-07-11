@@ -20,17 +20,24 @@ def migrate_schema():
     db = SessionLocal()
 
     try:
-        # Example: Add a new column
-        # db.execute(text("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS new_column VARCHAR(100)"))
+        # Add Cloudinary fields to documents table
+        db.execute(
+            text(
+                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS cloudinary_url VARCHAR(1000)"
+            )
+        )
+        db.execute(
+            text(
+                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS cloudinary_public_id VARCHAR(255)"
+            )
+        )
 
-        # Example: Create new index
-        # db.execute(text("CREATE INDEX IF NOT EXISTS idx_document_chunks_content ON document_chunks(content)"))
-
-        # Example: Update existing data
-        # db.execute(text("UPDATE document_chunks SET new_column = 'default_value' WHERE new_column IS NULL"))
+        # Make file_path nullable for Cloudinary compatibility
+        db.execute(text("ALTER TABLE documents ALTER COLUMN file_path DROP NOT NULL"))
 
         db.commit()
         print("Schema migration completed successfully")
+        print("Added Cloudinary fields to documents table")
 
     except Exception as e:
         db.rollback()

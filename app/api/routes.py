@@ -18,6 +18,7 @@ from app.services import (
     LLMService,
     QuestionAnsweringService,
 )
+from app.services.cloudinary_service import CloudinaryService
 from app.config import settings
 
 router = APIRouter()
@@ -27,6 +28,7 @@ embedding_service = EmbeddingService()
 document_processor = DocumentProcessor(embedding_service)
 llm_service = LLMService()
 qa_service = QuestionAnsweringService(embedding_service, llm_service)
+cloudinary_service = CloudinaryService()
 
 
 @router.post("/upload")
@@ -49,22 +51,62 @@ async def upload_document(
                 detail=f"Unsupported file format. Supported formats: {', '.join(settings.allowed_extensions)}",
             )
 
-        # Create upload directory if it doesn't exist
-        os.makedirs(settings.upload_dir, exist_ok=True)
+        # Read file content
+        file_content = await file.read()
 
-        # Save file
-        file_path = os.path.join(settings.upload_dir, file.filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # Check file size
+        if len(file_content) > settings.max_file_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File size exceeds maximum limit of {settings.max_file_size} bytes",
+            )
 
-        # Process and store document with embeddings
-        processing_result = document_processor.process_and_store_document(
-            file_path, current_user.id, file.filename, db
-        )
+        # Choose storage method based on configuration
+        if settings.use_cloudinary and cloudinary_service.is_available():
+            # Upload to Cloudinary
+            upload_result = cloudinary_service.upload_file(
+                file_content, file.filename, file_ext
+            )
+
+            if "error" in upload_result:
+                raise HTTPException(status_code=500, detail=upload_result["error"])
+
+            # Process and store document with Cloudinary URL
+            processing_result = (
+                document_processor.process_and_store_document_from_cloudinary(
+                    upload_result["url"],
+                    upload_result["public_id"],
+                    current_user.id,
+                    file.filename,
+                    upload_result["file_size"],
+                    file_ext,
+                    db,
+                )
+            )
+
+        else:
+            # Fallback to local storage
+            # Create upload directory if it doesn't exist
+            os.makedirs(settings.upload_dir, exist_ok=True)
+
+            # Save file locally
+            file_path = os.path.join(settings.upload_dir, file.filename)
+            with open(file_path, "wb") as buffer:
+                buffer.write(file_content)
+
+            # Process and store document with local file path
+            processing_result = document_processor.process_and_store_document(
+                file_path, current_user.id, file.filename, db
+            )
 
         if "error" in processing_result:
-            # Clean up file
-            os.remove(file_path)
+            # Clean up Cloudinary file if upload failed
+            if settings.use_cloudinary and cloudinary_service.is_available():
+                if "public_id" in upload_result:
+                    cloudinary_service.delete_file(upload_result["public_id"])
+            # Clean up local file if upload failed
+            elif os.path.exists(file_path):
+                os.remove(file_path)
             raise HTTPException(status_code=400, detail=processing_result["error"])
 
         return {
@@ -75,6 +117,11 @@ async def upload_document(
             "total_chunks": processing_result["total_chunks"],
             "file_size": processing_result["file_info"]["file_size"],
             "status": processing_result["status"],
+            "storage_type": (
+                "cloudinary"
+                if settings.use_cloudinary and cloudinary_service.is_available()
+                else "local"
+            ),
         }
 
     except HTTPException:
@@ -228,8 +275,17 @@ async def delete_document(
         if not document:
             raise HTTPException(status_code=404, detail="Document not found")
 
-        # Delete file from filesystem
-        if os.path.exists(document.file_path):
+        # Delete file from storage
+        if document.cloudinary_public_id:
+            # Delete from Cloudinary
+            delete_result = cloudinary_service.delete_file(
+                document.cloudinary_public_id
+            )
+            if "error" in delete_result:
+                # Log error but continue with database cleanup
+                print(f"Failed to delete Cloudinary file: {delete_result['error']}")
+        elif document.file_path and os.path.exists(document.file_path):
+            # Delete local file
             os.remove(document.file_path)
 
         # Delete document chunks and embeddings
