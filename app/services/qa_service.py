@@ -255,15 +255,21 @@ class QuestionAnsweringService:
             return [{"error": f"Batch processing failed: {str(e)}"}]
 
     def get_user_question_history(
-        self, user_id: int, db: Session, limit: int = 50
-    ) -> List[Dict[str, Any]]:
-        """Get user's question history"""
+        self,
+        user_id: int,
+        db: Session,
+        limit: int = 50,
+        page: int = 1,
+        page_size: int = 10,
+    ) -> dict:
+        """Get user's question history with pagination"""
         try:
+            query = db.query(Question).filter(Question.user_id == user_id)
+            total = query.count()
             questions = (
-                db.query(Question)
-                .filter(Question.user_id == user_id)
-                .order_by(Question.created_at.desc())
-                .limit(limit)
+                query.order_by(Question.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
                 .all()
             )
 
@@ -317,11 +323,11 @@ class QuestionAnsweringService:
                     }
                 )
 
-            return history
+            return {"history": history, "total": total}
 
         except Exception as e:
             print(f"Error getting question history: {e}")
-            return []
+            return {"history": [], "total": 0}
 
     def get_question_analytics(self, user_id: int, db: Session) -> Dict[str, Any]:
         """Get analytics for user's questions"""
@@ -450,13 +456,16 @@ class QuestionAnsweringService:
 
             # Calculate similarities using numpy
             import numpy as np
+
             similarities = []
             for q in user_questions:
                 q_embedding = self.embedding_service.create_embedding(q.question_text)
                 # Calculate cosine similarity using numpy
                 a = np.array(question_embedding)
                 b = np.array(q_embedding)
-                similarity = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+                similarity = float(
+                    np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+                )
                 similarities.append(
                     {
                         "question_id": q.id,

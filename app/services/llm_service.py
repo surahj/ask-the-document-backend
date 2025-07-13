@@ -110,8 +110,14 @@ class LLMService:
             4. Acknowledge when information is not available in the context
             5. Be concise but comprehensive
             6. Maintain professional and helpful tone
+            7. Use html tags to format your answer for best readability
 
             Important: Only use information from the provided context. Do not use external knowledge.
+
+            ALWAYS format your answers as HTML for best readability. Use:
+            - each sentence should be separated by two <br>
+            - each paragraph should be separated by two new lines
+            Do NOT include any <script> tags or unsafe HTML. Only use safe, semantic HTML tags. Your response will be rendered directly in a chat interface.
         """
 
     def _calculate_confidence(

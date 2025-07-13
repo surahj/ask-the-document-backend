@@ -308,19 +308,40 @@ async def delete_document(
 
 @router.get("/questions/history")
 async def get_question_history(
-    limit: int = Query(50, ge=1, le=100),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    """Get user's question history with sources"""
+    """Get user's question history with pagination"""
     try:
-        history = qa_service.get_user_question_history(current_user.id, db, limit)
-        return {"history": history}
-
+        result = qa_service.get_user_question_history(
+            current_user.id, db, page=page, page_size=page_size
+        )
+        return result
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to retrieve history: {str(e)}"
         )
+
+
+@router.delete("/questions/{question_id}")
+async def delete_question(
+    question_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Delete a question by ID (only for the current user)"""
+    question = (
+        db.query(Question)
+        .filter(Question.id == question_id, Question.user_id == current_user.id)
+        .first()
+    )
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    db.delete(question)
+    db.commit()
+    return {"message": "Question deleted successfully"}
 
 
 @router.get("/questions/analytics")
