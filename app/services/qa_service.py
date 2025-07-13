@@ -18,6 +18,7 @@ from app.models import (
 from app.services.embedding_service import EmbeddingService
 from app.services.llm_service import LLMService
 from app.config import settings
+import math
 
 
 class QuestionAnsweringService:
@@ -170,12 +171,14 @@ class QuestionAnsweringService:
             return {
                 "question": question,
                 "answer": llm_result["answer"],
-                "confidence": adjusted_confidence,
+                "confidence": self._sanitize_float(adjusted_confidence),
                 "sources": response_sources,
                 "reasoning": llm_result["reasoning"],
-                "processing_time": time.time() - start_time,
-                "grounding_score": grounding_result["score"],
-                "hallucination_risk": hallucination_result["hallucination_risk"],
+                "processing_time": self._sanitize_float(time.time() - start_time),
+                "grounding_score": self._sanitize_float(grounding_result["score"]),
+                "hallucination_risk": self._sanitize_float(
+                    hallucination_result["hallucination_risk"]
+                ),
                 "model": llm_result["model"],
                 "search_results_count": len(search_results),
             }
@@ -254,6 +257,13 @@ class QuestionAnsweringService:
         except Exception as e:
             return [{"error": f"Batch processing failed: {str(e)}"}]
 
+    def _sanitize_float(self, value):
+        try:
+            f = float(value)
+            return f if math.isfinite(f) else 0.0
+        except Exception:
+            return 0.0
+
     def get_user_question_history(
         self,
         user_id: int,
@@ -301,7 +311,9 @@ class QuestionAnsweringService:
                                 {
                                     "chunk_id": source.chunk_id,
                                     "document_id": chunk.document_id,
-                                    "similarity_score": source.similarity_score,
+                                    "similarity_score": self._sanitize_float(
+                                        source.similarity_score
+                                    ),
                                     "content": (
                                         chunk.content[:200] + "..."
                                         if len(chunk.content) > 200
@@ -316,8 +328,10 @@ class QuestionAnsweringService:
                         "id": question.id,
                         "question": question.question_text,
                         "answer": question.answer_text,
-                        "confidence": question.confidence_score,
-                        "processing_time": question.processing_time,
+                        "confidence": self._sanitize_float(question.confidence_score),
+                        "processing_time": self._sanitize_float(
+                            question.processing_time
+                        ),
                         "created_at": question.created_at.isoformat(),
                         "sources": source_list,
                     }

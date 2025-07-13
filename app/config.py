@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4"
     embedding_model: str = "all-MiniLM-L6-v2"
+    huggingface_api_key: Optional[str] = None
 
     # Processing
     chunk_size: int = 1000

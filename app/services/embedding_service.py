@@ -5,11 +5,14 @@ Embedding service for DocuMind AI Assistant with SQLite compatibility
 import json
 import numpy as np
 from typing import List, Dict, Any, Optional
-from sentence_transformers import SentenceTransformer
+
+# from sentence_transformers import SentenceTransformer
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.config import settings
 from app.models import DocumentChunk, Document
+import requests
+import math
 
 
 class EmbeddingService:
@@ -17,33 +20,78 @@ class EmbeddingService:
 
     def __init__(self):
         self.model_name = settings.embedding_model
-        self.model = SentenceTransformer(self.model_name)
+        self.hf_api_key = settings.huggingface_api_key
         self.similarity_threshold = 0.1  # Force low threshold for testing
         print(
             f"[DEBUG] EmbeddingService initialized with similarity_threshold={self.similarity_threshold}"
         )
         self.top_k = settings.top_k_results
-        self.embedding_dimension = 384  # Default for all-MiniLM-L6-v2
+        self.embedding_dimension = settings.embedding_dimension or 384
+        self.hf_api_url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{self.model_name}"
+
+    def _hf_headers(self):
+        return {"Authorization": f"Bearer {self.hf_api_key}"} if self.hf_api_key else {}
+
+    def _hf_embed(self, texts):
+        # texts: str or List[str]
+        data = texts if isinstance(texts, list) else [texts]
+        try:
+            response = requests.post(
+                self.hf_api_url,
+                headers=self._hf_headers(),
+                json={"inputs": data},
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = response.json()
+            # result: List[List[float]] or List[List[List[float]]]
+            # If single string, result is List[List[float]]
+            # If batch, result is List[List[List[float]]]
+            if isinstance(texts, str):
+                # Single input
+                if isinstance(result, list) and isinstance(result[0], list):
+                    # Sometimes result is [ [float, ...] ]
+                    if isinstance(result[0][0], float):
+                        return result[0]
+                    # Sometimes result is [ [ [float, ...] ] ]
+                    elif isinstance(result[0][0], list):
+                        return result[0][0]
+                return [0.0] * self.embedding_dimension
+            else:
+                # Batch input
+                embeddings = []
+                for emb in result:
+                    if isinstance(emb, list) and isinstance(emb[0], list):
+                        embeddings.append(emb[0])
+                    elif isinstance(emb, list) and isinstance(emb[0], float):
+                        embeddings.append(emb)
+                    else:
+                        embeddings.append([0.0] * self.embedding_dimension)
+                return embeddings
+        except Exception as e:
+            print(f"Error calling Hugging Face API: {e}")
+            if isinstance(texts, str):
+                return [0.0] * self.embedding_dimension
+            else:
+                return [[0.0] * self.embedding_dimension for _ in texts]
+
+    def _sanitize_embedding(self, embedding):
+        return [
+            float(x) if isinstance(x, (int, float)) and math.isfinite(x) else 0.0
+            for x in embedding
+        ]
 
     def create_embedding(self, text: str) -> List[float]:
         """Create embedding for given text"""
-        try:
-            if not text.strip():
-                return [0.0] * self.embedding_dimension
-
-            # Create embedding
-            embedding = self.model.encode(text, convert_to_tensor=False)
-            # Ensure we return a plain Python list, not numpy array
-            if hasattr(embedding, "tolist"):
-                return embedding.tolist()
-            elif isinstance(embedding, (list, tuple)):
-                return list(embedding)
-            else:
-                return [float(x) for x in embedding]
-
-        except Exception as e:
-            print(f"Error creating embedding: {e}")
-            # Return zero embedding on error
+        if not text.strip():
+            return [0.0] * self.embedding_dimension
+        if self.hf_api_key:
+            emb = self._hf_embed(text)
+            return self._sanitize_embedding(emb)
+        else:
+            print(
+                "Warning: No Hugging Face API key set, local embedding not supported."
+            )
             return [0.0] * self.embedding_dimension
 
     def search_similar(
@@ -130,31 +178,16 @@ class EmbeddingService:
 
     def batch_create_embeddings(self, texts: List[str]) -> List[List[float]]:
         """Create embeddings for multiple texts efficiently"""
-        try:
-            if not texts:
-                return []
-
-            # Filter out empty texts
-            valid_texts = [text for text in texts if text.strip()]
-            if not valid_texts:
-                return []
-
-            # Create embeddings in batch
-            embeddings = self.model.encode(valid_texts, convert_to_tensor=False)
-            # Ensure we return plain Python lists, not numpy arrays
-            if hasattr(embeddings, "tolist"):
-                return embeddings.tolist()
-            elif isinstance(embeddings, (list, tuple)):
-                return [
-                    list(emb) if hasattr(emb, "tolist") else emb for emb in embeddings
-                ]
-            else:
-                return [[float(x) for x in emb] for emb in embeddings]
-
-        except Exception as e:
-            print(f"Error in batch embedding creation: {e}")
-            # Return zero embeddings for all texts on error
-            return [[0.0] * self.embedding_dimension] * len(texts)
+        if not texts:
+            return []
+        if self.hf_api_key:
+            embs = self._hf_embed(texts)
+            return [self._sanitize_embedding(emb) for emb in embs]
+        else:
+            print(
+                "Warning: No Hugging Face API key set, local embedding not supported."
+            )
+            return [[0.0] * self.embedding_dimension for _ in texts]
 
     def get_embedding_dimension(self) -> int:
         """Get the dimension of embeddings"""
