@@ -20,6 +20,8 @@ from app.services import (
 )
 from app.services.cloudinary_service import CloudinaryService
 from app.config import settings
+import math
+import pprint
 
 router = APIRouter()
 
@@ -29,6 +31,20 @@ document_processor = DocumentProcessor(embedding_service)
 llm_service = LLMService()
 qa_service = QuestionAnsweringService(embedding_service, llm_service)
 cloudinary_service = CloudinaryService()
+
+
+def sanitize_json(obj):
+    # Handle Pydantic/BaseModel objects
+    if hasattr(obj, "dict"):
+        return sanitize_json(obj.dict())
+    if isinstance(obj, dict):
+        return {k: sanitize_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_json(v) for v in obj]
+    elif isinstance(obj, float):
+        return float(obj) if math.isfinite(obj) else 0.0
+    else:
+        return obj
 
 
 @router.post("/upload")
@@ -145,7 +161,9 @@ async def ask_question(
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
 
-        return result
+        sanitized = sanitize_json(result)
+        pprint.pprint(sanitized)
+        return sanitized
 
     except HTTPException:
         raise

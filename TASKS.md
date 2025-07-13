@@ -368,5 +368,15 @@ DocuMind AI Assistant is an AI-powered document Q&A system that allows users to 
 
 ---
 
+## pip freeze > requirements.txt
+
+```bash
+pip install -r requirements.txt
+```
+
+
+
+
+
 _Last Updated: December 2024_
 _Next Review: January 2025_

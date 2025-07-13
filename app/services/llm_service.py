@@ -5,73 +5,56 @@ LLM service for DocuMind AI Assistant
 import json
 import time
 from typing import List, Dict, Any, Optional
-from openai import OpenAI
 from app.config import settings
+import requests
+import math
+import os
+from huggingface_hub import InferenceClient
 
 
 class LLMService:
-    """LLM service for answer generation"""
+    """LLM service for answer generation using DeepSeek-V3 via Hugging Face InferenceClient (fireworks-ai)"""
 
     def __init__(self):
-        self.model = settings.openai_model
-        self.client = None
-        self.api_key = settings.openai_api_key
-
-        # Only initialize OpenAI client if API key is provided and not a placeholder
-        if self.api_key and self.api_key != "":
-            try:
-                self.client = OpenAI(api_key=self.api_key)
-            except Exception as e:
-                print(f"Warning: Failed to initialize OpenAI client: {e}")
-                self.client = None
+        self.model = "deepseek-ai/DeepSeek-V3"
+        self.api_key = settings.huggingface_api_key
+        self.client = InferenceClient(
+            provider="fireworks-ai",
+            api_key=self.api_key,
+        )
 
     def generate_answer(
         self, question: str, context_chunks: List[str], sources: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Generate answer using LLM"""
+        prompt = self._create_prompt(question, self._prepare_context(context_chunks))
+        system_prompt = self._get_system_prompt()
         try:
-            if not self.client:
-                return self._generate_mock_answer(question, context_chunks, sources)
-
-            # Prepare context
-            context_text = self._prepare_context(context_chunks)
-
-            # Create prompt
-            prompt = self._create_prompt(question, context_text)
-
-            # Generate response
+            # Use the InferenceClient for text generation
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": self._get_system_prompt()},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=1000,
-                temperature=0.3,
-                top_p=0.9,
             )
+            answer = response.choices[0].message.content
 
-            answer = response.choices[0].message.content.strip()
-
-            # Calculate confidence based on response quality
-            confidence = self._calculate_confidence(answer, sources)
-
-            # Generate reasoning
+            confidence = self._sanitize_float(
+                self._calculate_confidence(answer, sources)
+            )
             reasoning = self._generate_reasoning(question, answer, sources)
-
-            return {
+            sanitized_sources = self._sanitize_sources(sources)
+            response_dict = {
                 "answer": answer,
                 "confidence": confidence,
-                "sources": sources,
+                "sources": sanitized_sources,
                 "reasoning": reasoning,
                 "model": self.model,
-                "tokens_used": (
-                    response.usage.total_tokens if hasattr(response, "usage") else 0
-                ),
+                "tokens_used": 0,
             }
-
+            return self._sanitize_json(response_dict)
         except Exception as e:
-            # Fallback to mock answer on error
+            print(f"[LLMService] DeepSeek-V3 failed: {e}")
             return self._generate_mock_answer(
                 question, context_chunks, sources, error=str(e)
             )
@@ -101,24 +84,21 @@ class LLMService:
         """
 
     def _get_system_prompt(self) -> str:
-        """Get system prompt for LLM"""
-        return """You are DocuMind AI Assistant, an AI-powered document Q&A system. Your role is to:
-
-            1. Answer questions based ONLY on the provided context
-            2. Provide accurate, factual responses
-            3. Cite specific information from the context when possible
-            4. Acknowledge when information is not available in the context
-            5. Be concise but comprehensive
-            6. Maintain professional and helpful tone
-            7. Use html tags to format your answer for best readability
-
-            Important: Only use information from the provided context. Do not use external knowledge.
-
-            ALWAYS format your answers as HTML for best readability. Use:
-            - each sentence should be separated by two <br>
-            - each paragraph should be separated by two new lines
-            Do NOT include any <script> tags or unsafe HTML. Only use safe, semantic HTML tags. Your response will be rendered directly in a chat interface.
-        """
+        """Get improved system prompt for DeepSeek-V3"""
+        return (
+            "You are DocuMind AI Assistant, an expert document Q&A system. "
+            "Your job is to answer user questions using ONLY the provided context. "
+            "If the answer is not in the context, say so clearly.\n\n"
+            "Instructions:\n"
+            "- Use only the information from the provided context.\n"
+            "- Be concise, accurate, and professional.\n"
+            "- If you cite information, mention the context number or snippet.\n"
+            "- If the answer is not found, reply: 'Sorry, I could not find the answer in the provided documents.'\n"
+            "- Format your answer as HTML for best readability.\n"
+            "- Use <h3> for headings, <p> for paragraphs, <ul>/<ol> for lists, and <br> d by two <br>\n"
+            "- each paragraph should be separated by two new lines\n"
+            "Context will be provided below.\n"
+        )
 
     def _calculate_confidence(
         self, answer: str, sources: List[Dict[str, Any]]
@@ -208,15 +188,20 @@ class LLMService:
 
             # Calculate mock confidence
             confidence = 0.7 if sources else 0.3
-
-            return {
+            sanitized_sources = self._sanitize_sources(sources)
+            response_dict = {
                 "answer": answer,
-                "confidence": confidence,
-                "sources": sources,
-                "reasoning": "Generated using fallback response mechanism.",
+                "confidence": self._sanitize_float(confidence),
+                "sources": sanitized_sources,
+                "reasoning": (
+                    "Generated using fallback response mechanism."
+                    if not error
+                    else f"Generated using fallback response due to error: {error}"
+                ),
                 "model": "mock",
                 "tokens_used": 0,
             }
+            return self._sanitize_json(response_dict)
 
         except Exception:
             return {
@@ -311,3 +296,32 @@ class LLMService:
             "high": "Answer may contain hallucinated content. Verify with original sources.",
         }
         return recommendations.get(risk_level, "Unable to assess answer quality.")
+
+    def _sanitize_float(self, value):
+        try:
+            f = float(value)
+            return f if math.isfinite(f) else 0.0
+        except Exception:
+            return 0.0
+
+    def _sanitize_sources(self, sources):
+        # Recursively sanitize all float values in sources
+        sanitized = []
+        for s in sources:
+            s_copy = dict(s)
+            for k, v in s_copy.items():
+                if isinstance(v, float):
+                    s_copy[k] = self._sanitize_float(v)
+            sanitized.append(s_copy)
+        return sanitized
+
+    def _sanitize_json(self, obj):
+        # Recursively sanitize all float values in a dict/list
+        if isinstance(obj, dict):
+            return {k: self._sanitize_json(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._sanitize_json(v) for v in obj]
+        elif isinstance(obj, float):
+            return self._sanitize_float(obj)
+        else:
+            return obj

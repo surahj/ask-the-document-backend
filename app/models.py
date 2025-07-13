@@ -122,6 +122,17 @@ class QuestionSource(Base):
     chunk = relationship("DocumentChunk")
 
 
+class OTP(Base):
+    __tablename__ = "otps"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(100), index=True, nullable=False)
+    otp_code = Column(String(10), nullable=False)
+    purpose = Column(String(20), nullable=False)  # 'signup' or 'reset'
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    is_used = Column(Boolean, default=False)
+
+
 # Pydantic Models for API
 class UserBase(BaseModel):
     """Base user model"""

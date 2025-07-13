@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     secret_key: str = "your-secret-key-here"
     access_token_expire_minutes: int = 60 * 24 * 30  # 30 days
 
+    # Email Provider
+    email_provider: str = "gmail"
+    gmail_sender_email: Optional[str] = None
+    gmail_app_password: Optional[str] = None
+
     model_config = {"env_file": ".env", "case_sensitive": False, "extra": "ignore"}
 
     def __init__(self, **kwargs):

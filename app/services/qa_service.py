@@ -118,6 +118,15 @@ class QuestionAnsweringService:
                 question, chunk_contents, sources
             )
 
+            # If LLM failed and returned a mock answer, do not save, return error
+            if (
+                llm_result.get("model") == "mock"
+                or "fallback" in llm_result.get("reasoning", "").lower()
+            ):
+                return {
+                    "error": "Sorry, I couldn't process your question right now. Please try again later."
+                }
+
             # Validate answer grounding
             grounding_result = self.llm_service.validate_answer_grounding(
                 llm_result["answer"], sources
@@ -151,8 +160,8 @@ class QuestionAnsweringService:
                 user_id=user_id,
                 question_text=question,
                 answer_text=llm_result["answer"],
-                confidence_score=adjusted_confidence,
-                processing_time=time.time() - start_time,
+                confidence_score=self._sanitize_float(adjusted_confidence),
+                processing_time=self._sanitize_float(time.time() - start_time),
             )
             db.add(db_question)
             db.flush()  # Get the ID
@@ -162,13 +171,13 @@ class QuestionAnsweringService:
                 db_source = QuestionSource(
                     question_id=db_question.id,
                     chunk_id=source["chunk_id"],
-                    similarity_score=source["similarity"],
+                    similarity_score=self._sanitize_float(source["similarity"]),
                 )
                 db.add(db_source)
 
             db.commit()
 
-            return {
+            response = {
                 "question": question,
                 "answer": llm_result["answer"],
                 "confidence": self._sanitize_float(adjusted_confidence),
@@ -182,6 +191,7 @@ class QuestionAnsweringService:
                 "model": llm_result["model"],
                 "search_results_count": len(search_results),
             }
+            return self._sanitize_json(response)
 
         except Exception as e:
             db.rollback()
@@ -263,6 +273,17 @@ class QuestionAnsweringService:
             return f if math.isfinite(f) else 0.0
         except Exception:
             return 0.0
+
+    def _sanitize_json(self, obj):
+        # Recursively sanitize all float values in a dict/list
+        if isinstance(obj, dict):
+            return {k: self._sanitize_json(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._sanitize_json(v) for v in obj]
+        elif isinstance(obj, float):
+            return self._sanitize_float(obj)
+        else:
+            return obj
 
     def get_user_question_history(
         self,

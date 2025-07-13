@@ -4,13 +4,14 @@ Authentication API endpoints for DocuMind AI Assistant
 
 from datetime import timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Form
+from fastapi import APIRouter, Depends, HTTPException, status, Form, Body
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from pydantic import BaseModel
 from app.database import get_db
-from app.models import User, UserResponse
+from app.models import User, UserResponse, OTP
+from app.services.email_service import EmailService
 from app.auth import (
     authenticate_user,
     create_access_token,
@@ -21,6 +22,8 @@ from app.auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
 )
 from app.config import settings
+import random
+from datetime import datetime, timedelta
 
 router = APIRouter()
 
@@ -39,7 +42,7 @@ class RegisterRequest(BaseModel):
 
 @router.post("/register", response_model=UserResponse)
 async def register(request: RegisterRequest, db: Session = Depends(get_db)):
-    """Register a new user"""
+    """Register a new user (requires verified OTP)"""
     # Validate input
     if not request.username or len(request.username) < 3:
         raise HTTPException(
@@ -67,6 +70,24 @@ async def register(request: RegisterRequest, db: Session = Depends(get_db)):
     if existing_email:
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    # Enforce OTP verification for signup
+    otp = (
+        db.query(OTP)
+        .filter(
+            OTP.email == request.email,
+            OTP.purpose == "signup",
+            OTP.is_used == False,
+            OTP.expires_at > datetime.utcnow(),
+        )
+        .order_by(OTP.created_at.desc())
+        .first()
+    )
+    if not otp:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP verification required. Please verify your email with the OTP sent.",
+        )
+
     # Create new user
     hashed_password = get_password_hash(request.password)
     user = User(
@@ -78,6 +99,8 @@ async def register(request: RegisterRequest, db: Session = Depends(get_db)):
 
     try:
         db.add(user)
+        # Mark OTP as used only after successful registration
+        otp.is_used = True
         db.commit()
         db.refresh(user)
 
@@ -191,3 +214,124 @@ async def deactivate_account(
         raise HTTPException(
             status_code=500, detail=f"Account deactivation failed: {str(e)}"
         )
+
+
+# Utility to generate a 6-digit OTP
+
+
+def generate_otp():
+    return str(random.randint(100000, 999999))
+
+
+# Endpoint: Send OTP (for signup or password reset)
+@router.post("/send-otp")
+async def send_otp(
+    email: str = Body(...),
+    purpose: str = Body(..., regex="^(signup|reset)$"),
+    username: str = Body(None),
+    db: Session = Depends(get_db),
+):
+    """Send OTP for signup or password reset"""
+    user = db.query(User).filter(User.email == email).first()
+    if purpose == "signup":
+        if user:
+            raise HTTPException(
+                status_code=400,
+                detail="This email is already registered. Please log in or use 'Forgot Password' to reset your password.",
+            )
+        if username:
+            existing_user = db.query(User).filter(User.username == username).first()
+            if existing_user:
+                raise HTTPException(
+                    status_code=400,
+                    detail="This username is already taken. Please choose another username.",
+                )
+    if purpose == "reset" and not user:
+        raise HTTPException(status_code=404, detail="Email not found")
+    first_name = user.username if user else email.split("@")[0]
+    otp_code = generate_otp()
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
+    # Invalidate previous OTPs for this email/purpose
+    db.query(OTP).filter(
+        OTP.email == email, OTP.purpose == purpose, OTP.is_used == False
+    ).update({"is_used": True})
+    otp = OTP(
+        email=email,
+        otp_code=otp_code,
+        purpose=purpose,
+        created_at=datetime.utcnow(),
+        expires_at=expires_at,
+        is_used=False,
+    )
+    db.add(otp)
+    db.commit()
+    db.refresh(otp)
+    email_service = EmailService()
+    if purpose == "signup":
+        await email_service.send_otp_email(email, first_name, otp_code)
+    else:
+        await email_service.send_password_reset_email(email, first_name, otp_code)
+    return {"message": f"OTP sent to {email}"}
+
+
+# Endpoint: Verify OTP
+@router.post("/verify-otp")
+async def verify_otp(
+    email: str = Body(...),
+    otp_code: str = Body(...),
+    purpose: str = Body(..., regex="^(signup|reset)$"),
+    db: Session = Depends(get_db),
+):
+    """Verify OTP for signup or password reset (does NOT mark as used)"""
+    otp = (
+        db.query(OTP)
+        .filter(
+            OTP.email == email,
+            OTP.otp_code == otp_code,
+            OTP.purpose == purpose,
+            OTP.is_used == False,
+            OTP.expires_at > datetime.utcnow(),
+        )
+        .first()
+    )
+    if not otp:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    # Do NOT mark as used here
+    return {"message": "OTP verified"}
+
+
+# Endpoint: Reset password after OTP verification
+@router.post("/reset-password")
+async def reset_password(
+    email: str = Body(...),
+    otp_code: str = Body(...),
+    new_password: str = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Reset password after OTP verification"""
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    otp = (
+        db.query(OTP)
+        .filter(
+            OTP.email == email,
+            OTP.otp_code == otp_code,
+            OTP.purpose == "reset",
+            OTP.is_used == False,
+            OTP.expires_at > datetime.utcnow(),
+        )
+        .first()
+    )
+    if not otp:
+        raise HTTPException(status_code=400, detail="OTP not verified or expired")
+    if not validate_password(new_password):
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 8 characters long and contain uppercase, lowercase, and numeric characters",
+        )
+    user.hashed_password = get_password_hash(new_password)
+    # Mark OTP as used only after successful password reset
+    otp.is_used = True
+    db.commit()
+    return {"message": "Password reset successful"}
