@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 import requests
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pathlib import Path
 import PyPDF2
 from docx import Document as DocxDocument
@@ -61,8 +61,8 @@ class DocumentProcessor:
     ) -> Dict[str, Any]:
         """Download file from Cloudinary URL for processing"""
         try:
-            # Download file from Cloudinary
-            response = requests.get(cloudinary_url, stream=True)
+            # Add timeout and better error handling
+            response = requests.get(cloudinary_url, stream=True, timeout=30)
             response.raise_for_status()
 
             # Create temporary file
@@ -75,6 +75,31 @@ class DocumentProcessor:
 
             return {"success": True, "temp_file_path": temp_file_path}
 
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                return {
+                    "error": "Cloudinary authentication failed. Please check your Cloudinary credentials in the .env file."
+                }
+            elif e.response.status_code == 404:
+                return {
+                    "error": "File not found in Cloudinary. The file may have been deleted or moved."
+                }
+            elif e.response.status_code == 403:
+                return {
+                    "error": "Access denied to Cloudinary file. The file may be private or require different permissions."
+                }
+            else:
+                return {
+                    "error": f"Failed to download from Cloudinary: HTTP {e.response.status_code} - {e.response.text}"
+                }
+        except requests.exceptions.Timeout:
+            return {
+                "error": "Timeout while downloading from Cloudinary. Please try again."
+            }
+        except requests.exceptions.ConnectionError:
+            return {
+                "error": "Connection error while accessing Cloudinary. Please check your internet connection."
+            }
         except Exception as e:
             return {"error": f"Failed to download from Cloudinary: {str(e)}"}
 
@@ -284,11 +309,109 @@ class DocumentProcessor:
         except Exception as e:
             return {"error": f"Document processing error: {str(e)}"}
 
+    def process_document_bytes(
+        self,
+        file_content: bytes,
+        file_ext: str,
+        user_id: int,
+        filename: str,
+        db: Session,
+    ) -> Dict[str, Any]:
+        """Process document from bytes (no Cloudinary download)"""
+        try:
+            # Save to a temporary file for processing
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                delete=False, suffix=file_ext
+            ) as temp_file:
+                temp_file.write(file_content)
+                temp_file_path = temp_file.name
+            try:
+                # Validate document
+                validation = self.validate_document(temp_file_path)
+                if "error" in validation:
+                    return validation
+                # Extract text
+                extraction = self.extract_text(temp_file_path)
+                if "error" in extraction:
+                    return extraction
+                # Chunk text
+                chunks = self.chunk_text(extraction["text"])
+                if not chunks or (isinstance(chunks, list) and "error" in chunks[0]):
+                    return {"error": "Failed to chunk document"}
+                return {"chunks": chunks}
+            finally:
+                import os
+
+                if os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)
+        except Exception as e:
+            return {"error": f"Document processing error: {str(e)}"}
+
+    def save_document_record(
+        self,
+        user_id: int,
+        filename: str,
+        file_size: int,
+        file_type: str,
+        db: Session,
+        cloudinary_url: Optional[str] = None,
+        cloudinary_public_id: Optional[str] = None,
+        chunks: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
+        """Save document and chunks to DB, including Cloudinary URL if provided"""
+        from app.models import Document, DocumentChunk
+
+        try:
+            document = Document(
+                user_id=user_id,
+                filename=filename,
+                file_size=file_size,
+                file_type=file_type,
+                status="processed",
+                cloudinary_url=cloudinary_url,
+                cloudinary_public_id=cloudinary_public_id,
+            )
+            db.add(document)
+            db.flush()  # Get document.id
+            # Save chunks
+            if chunks:
+                for chunk_data in chunks:
+                    chunk = DocumentChunk(
+                        document_id=document.id,
+                        chunk_index=chunk_data["chunk_index"],
+                        content=chunk_data["content"],
+                        start_position=chunk_data["start_position"],
+                        end_position=chunk_data["end_position"],
+                    )
+                    db.add(chunk)
+            db.commit()
+            return document.id
+        except Exception as e:
+            db.rollback()
+            import logging
+
+            logging.error(f"Failed to save document record: {e}")
+            raise
+
     def process_and_store_document(
         self, file_path: str, user_id: int, filename: str, db: Session
     ) -> Dict[str, Any]:
         """Process document and store with embeddings in database"""
         try:
+            # Check if document with same filename already exists for this user
+            existing_doc = (
+                db.query(Document)
+                .filter(Document.user_id == user_id, Document.filename == filename)
+                .first()
+            )
+
+            if existing_doc:
+                return {
+                    "error": f"Document '{filename}' already exists. Please use a different filename or delete the existing document first."
+                }
+
             # Process document
             result = self.process_document(file_path)
             if "error" in result:
@@ -361,6 +484,18 @@ class DocumentProcessor:
     ) -> Dict[str, Any]:
         """Process document from Cloudinary URL and store with embeddings in database"""
         try:
+            # Check if document with same filename already exists for this user
+            existing_doc = (
+                db.query(Document)
+                .filter(Document.user_id == user_id, Document.filename == filename)
+                .first()
+            )
+
+            if existing_doc:
+                return {
+                    "error": f"Document '{filename}' already exists. Please use a different filename or delete the existing document first."
+                }
+
             # Extract text from Cloudinary
             extraction = self.extract_text_from_cloudinary(cloudinary_url, file_type)
             if "error" in extraction:

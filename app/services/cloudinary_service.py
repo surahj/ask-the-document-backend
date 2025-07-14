@@ -4,11 +4,17 @@ Cloudinary service for file uploads and management
 
 import os
 import tempfile
+import uuid
+import time
+import logging
 from typing import Dict, Any, Optional
 import cloudinary
 import cloudinary.uploader
 import cloudinary.api
 from app.config import settings
+
+# Setup logging
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
 
 
 class CloudinaryService:
@@ -19,6 +25,11 @@ class CloudinaryService:
         self.api_key = settings.cloudinary_api_key
         self.api_secret = settings.cloudinary_api_secret
         self.folder = settings.cloudinary_folder
+
+        # Log config (do not log secret)
+        logging.info(
+            f"Cloudinary config: cloud_name={self.cloud_name}, api_key={self.api_key}, folder={self.folder}"
+        )
 
         # Configure Cloudinary
         if all([self.cloud_name, self.api_key, self.api_secret]):
@@ -46,7 +57,13 @@ class CloudinaryService:
             Dict with upload result or error
         """
         try:
+            logging.info(
+                f"Uploading file: {filename}, size={len(file_content)} bytes, type={file_type}"
+            )
             if not self.is_configured:
+                logging.error(
+                    "Cloudinary not configured. Please set cloudinary credentials."
+                )
                 return {
                     "error": "Cloudinary not configured. Please set cloudinary credentials."
                 }
@@ -59,14 +76,24 @@ class CloudinaryService:
                 temp_file_path = temp_file.name
 
             try:
+                # Generate unique filename with timestamp and UUID
+                base_name = os.path.splitext(filename)[0]
+                timestamp = int(time.time())
+                unique_id = str(uuid.uuid4())[:8]
+                unique_filename = f"{base_name}_{timestamp}_{unique_id}"
+                logging.info(
+                    f"Generated unique filename for Cloudinary: {unique_filename}"
+                )
+
                 # Upload to Cloudinary
                 upload_result = cloudinary.uploader.upload(
                     temp_file_path,
                     folder=self.folder,
                     resource_type="auto",
-                    public_id=f"{os.path.splitext(filename)[0]}_{os.urandom(4).hex()}",  # Unique ID
+                    public_id=unique_filename,
                     overwrite=False,
                 )
+                logging.info(f"Cloudinary upload result: {upload_result}")
 
                 return {
                     "success": True,
@@ -82,7 +109,18 @@ class CloudinaryService:
                 if os.path.exists(temp_file_path):
                     os.unlink(temp_file_path)
 
+        except cloudinary.exceptions.Error as e:
+            logging.error(f"Cloudinary exception: {e}")
+            if "401" in str(e) or "Unauthorized" in str(e):
+                return {
+                    "error": "Cloudinary authentication failed. Please check your API credentials."
+                }
+            elif "404" in str(e):
+                return {"error": "Cloudinary resource not found."}
+            else:
+                return {"error": f"Cloudinary upload failed: {str(e)}"}
         except Exception as e:
+            logging.error(f"Upload failed: {e}")
             return {"error": f"Upload failed: {str(e)}"}
 
     def delete_file(self, public_id: str) -> Dict[str, Any]:

@@ -34,12 +34,12 @@ class Settings(BaseSettings):
     cloudinary_api_key: Optional[str] = None
     cloudinary_api_secret: Optional[str] = None
     cloudinary_folder: str = "documind"  # Folder in Cloudinary
-    use_cloudinary: bool = False  # Toggle between local and cloud storage
+    use_cloudinary: bool = True  # Toggle between local and cloud storage
 
     # AI Services
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4"
-    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     huggingface_api_key: Optional[str] = None
 
     # Processing

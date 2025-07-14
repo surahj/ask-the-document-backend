@@ -22,6 +22,7 @@ from app.services.cloudinary_service import CloudinaryService
 from app.config import settings
 import math
 import pprint
+import logging
 
 router = APIRouter()
 
@@ -53,97 +54,72 @@ async def upload_document(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    """Upload and process a document with vector embeddings"""
     try:
-        # Validate file
-        if not file.filename:
-            raise HTTPException(status_code=400, detail="No file provided")
-
-        # Check file extension
-        file_ext = os.path.splitext(file.filename)[1].lower()
-        if file_ext not in settings.allowed_extensions:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file format. Supported formats: {', '.join(settings.allowed_extensions)}",
-            )
-
-        # Read file content
+        logging.info(
+            f"Received upload: filename={file.filename}, content_type={file.content_type}"
+        )
+        # Read file content ONCE
         file_content = await file.read()
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        logging.info(f"File extension: {file_ext}, size={len(file_content)} bytes")
 
-        # Check file size
-        if len(file_content) > settings.max_file_size:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File size exceeds maximum limit of {settings.max_file_size} bytes",
-            )
+        # Process the file content directly (extract text, chunk, embed, etc.)
+        processing_result = document_processor.process_document_bytes(
+            file_content, file_ext, current_user.id, file.filename, db
+        )
+        logging.info(f"Processing result: {processing_result}")
+        if "error" in processing_result:
+            logging.error(f"Processing error: {processing_result['error']}")
+            raise HTTPException(status_code=400, detail=processing_result["error"])
 
-        # Choose storage method based on configuration
+        # Upload to Cloudinary for storage/reference
+        cloudinary_url = None
+        cloudinary_public_id = None
         if settings.use_cloudinary and cloudinary_service.is_available():
-            # Upload to Cloudinary
+            logging.info("Uploading to Cloudinary for storage/reference.")
             upload_result = cloudinary_service.upload_file(
                 file_content, file.filename, file_ext
             )
-
+            logging.info(f"Cloudinary upload_result: {upload_result}")
             if "error" in upload_result:
+                logging.error(f"Cloudinary upload error: {upload_result['error']}")
                 raise HTTPException(status_code=500, detail=upload_result["error"])
+            cloudinary_url = upload_result["url"]
+            cloudinary_public_id = upload_result["public_id"]
 
-            # Process and store document with Cloudinary URL
-            processing_result = (
-                document_processor.process_and_store_document_from_cloudinary(
-                    upload_result["url"],
-                    upload_result["public_id"],
-                    current_user.id,
-                    file.filename,
-                    upload_result["file_size"],
-                    file_ext,
-                    db,
-                )
-            )
-
-        else:
-            # Fallback to local storage
-            # Create upload directory if it doesn't exist
-            os.makedirs(settings.upload_dir, exist_ok=True)
-
-            # Save file locally
-            file_path = os.path.join(settings.upload_dir, file.filename)
-            with open(file_path, "wb") as buffer:
-                buffer.write(file_content)
-
-            # Process and store document with local file path
-            processing_result = document_processor.process_and_store_document(
-                file_path, current_user.id, file.filename, db
-            )
-
-        if "error" in processing_result:
-            # Clean up Cloudinary file if upload failed
-            if settings.use_cloudinary and cloudinary_service.is_available():
-                if "public_id" in upload_result:
-                    cloudinary_service.delete_file(upload_result["public_id"])
-            # Clean up local file if upload failed
-            elif os.path.exists(file_path):
-                os.remove(file_path)
-            raise HTTPException(status_code=400, detail=processing_result["error"])
+        # Save document record with Cloudinary URL (if available)
+        document_id = document_processor.save_document_record(
+            user_id=current_user.id,
+            filename=file.filename,
+            file_size=len(file_content),
+            file_type=file_ext,
+            db=db,
+            cloudinary_url=cloudinary_url,
+            cloudinary_public_id=cloudinary_public_id,
+            chunks=processing_result.get("chunks", []),
+        )
 
         return {
             "success": True,
-            "document_id": processing_result["document_id"],
+            "document_id": document_id,
             "filename": file.filename,
-            "chunks_created": processing_result["chunks_created"],
-            "total_chunks": processing_result["total_chunks"],
-            "file_size": processing_result["file_info"]["file_size"],
-            "status": processing_result["status"],
+            "chunks_created": len(processing_result.get("chunks", [])),
+            "total_chunks": len(processing_result.get("chunks", [])),
+            "file_size": len(file_content),
+            "status": "processed",
             "storage_type": (
                 "cloudinary"
                 if settings.use_cloudinary and cloudinary_service.is_available()
                 else "local"
             ),
+            "cloudinary_url": cloudinary_url,
         }
 
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
+        logging.error(f"Upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 

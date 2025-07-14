@@ -27,7 +27,9 @@ class EmbeddingService:
         )
         self.top_k = settings.top_k_results
         self.embedding_dimension = settings.embedding_dimension or 384
-        self.hf_api_url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{self.model_name}"
+        self.hf_api_url = (
+            f"https://api-inference.huggingface.co/models/{self.model_name}"
+        )
 
     def _hf_headers(self):
         return {"Authorization": f"Bearer {self.hf_api_key}"} if self.hf_api_key else {}
