@@ -295,6 +295,7 @@ class QuestionAnsweringService:
     ) -> dict:
         """Get user's question history with pagination"""
         try:
+            # Get questions with pagination
             query = db.query(Question).filter(Question.user_id == user_id)
             total = query.count()
             questions = (
@@ -304,45 +305,48 @@ class QuestionAnsweringService:
                 .all()
             )
 
-            history = []
-            for question in questions:
-                # Get sources for this question
-                sources = (
-                    db.query(QuestionSource)
-                    .filter(QuestionSource.question_id == question.id)
-                    .all()
+            if not questions:
+                return {"history": [], "total": total}
+
+            # Get all question IDs for efficient querying
+            question_ids = [q.id for q in questions]
+
+            # Get all sources for these questions in one query with joins
+            sources_query = (
+                db.query(QuestionSource, DocumentChunk, Document)
+                .join(DocumentChunk, QuestionSource.chunk_id == DocumentChunk.id)
+                .join(Document, DocumentChunk.document_id == Document.id)
+                .filter(QuestionSource.question_id.in_(question_ids))
+            )
+
+            sources_data = sources_query.all()
+
+            # Group sources by question_id
+            sources_by_question = {}
+            for source, chunk, document in sources_data:
+                if source.question_id not in sources_by_question:
+                    sources_by_question[source.question_id] = []
+
+                sources_by_question[source.question_id].append(
+                    {
+                        "chunk_id": source.chunk_id,
+                        "document_id": chunk.document_id,
+                        "similarity_score": self._sanitize_float(
+                            source.similarity_score
+                        ),
+                        "content": (
+                            chunk.content[:200] + "..."
+                            if len(chunk.content) > 200
+                            else chunk.content
+                        ),
+                        "filename": document.filename,
+                    }
                 )
 
-                source_list = []
-                for source in sources:
-                    # Get chunk and document info
-                    chunk = (
-                        db.query(DocumentChunk)
-                        .filter(DocumentChunk.id == source.chunk_id)
-                        .first()
-                    )
-                    if chunk:
-                        document = (
-                            db.query(Document)
-                            .filter(Document.id == chunk.document_id)
-                            .first()
-                        )
-                        if document:
-                            source_list.append(
-                                {
-                                    "chunk_id": source.chunk_id,
-                                    "document_id": chunk.document_id,
-                                    "similarity_score": self._sanitize_float(
-                                        source.similarity_score
-                                    ),
-                                    "content": (
-                                        chunk.content[:200] + "..."
-                                        if len(chunk.content) > 200
-                                        else chunk.content
-                                    ),
-                                    "filename": document.filename,
-                                }
-                            )
+            # Build history response
+            history = []
+            for question in questions:
+                source_list = sources_by_question.get(question.id, [])
 
                 history.append(
                     {

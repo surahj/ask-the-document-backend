@@ -362,6 +362,7 @@ class DocumentProcessor:
     ) -> int:
         """Save document and chunks to DB, including Cloudinary URL if provided"""
         from app.models import Document, DocumentChunk
+        import numpy as np
 
         try:
             document = Document(
@@ -375,7 +376,8 @@ class DocumentProcessor:
             )
             db.add(document)
             db.flush()  # Get document.id
-            # Save chunks
+
+            # Save chunks and create embeddings
             if chunks:
                 for chunk_data in chunks:
                     chunk = DocumentChunk(
@@ -386,6 +388,20 @@ class DocumentProcessor:
                         end_position=chunk_data["end_position"],
                     )
                     db.add(chunk)
+                    db.flush()  # Get chunk.id
+
+                    # Create and store embedding
+                    embedding = self.embedding_service.create_embedding(
+                        chunk_data["content"]
+                    )
+                    if embedding:
+                        # Store embedding directly as list for PostgreSQL VECTOR type
+                        chunk.embedding = embedding
+                    else:
+                        print(
+                            f"Warning: Failed to create embedding for chunk {chunk_data['chunk_index']}"
+                        )
+
             db.commit()
             return document.id
         except Exception as e:
@@ -571,13 +587,24 @@ class DocumentProcessor:
     def delete_document_chunks(self, document_id: int, db: Session) -> bool:
         """Delete all chunks and embeddings for a document"""
         try:
-            # Delete chunks (embeddings will be deleted due to cascade)
+            from app.models import QuestionSource
+
+            # First, delete all question sources that reference chunks from this document
             chunks = (
                 db.query(DocumentChunk)
                 .filter(DocumentChunk.document_id == document_id)
                 .all()
             )
 
+            chunk_ids = [chunk.id for chunk in chunks]
+
+            if chunk_ids:
+                # Delete question sources that reference these chunks
+                db.query(QuestionSource).filter(
+                    QuestionSource.chunk_id.in_(chunk_ids)
+                ).delete(synchronize_session=False)
+
+            # Now delete the chunks
             for chunk in chunks:
                 db.delete(chunk)
 

@@ -73,30 +73,38 @@ class LLMService:
 
     def _create_prompt(self, question: str, context: str) -> str:
         """Create prompt for LLM"""
-        return f"""Based on the following context, please answer the question. If the answer cannot be found in the context, say so.
+        return f"""Based on the following context, please answer the question. 
 
-            Context:
-            {context}
+Context:
+{context}
 
-            Question: {question}
+Question: {question}
 
-            Please provide a clear, accurate answer based only on the information provided in the context.
-        """
+Instructions:
+- If the context contains relevant information, provide an answer based on what you can find.
+- If the context is somewhat related but doesn't fully answer the question, provide what you can and note any limitations.
+- Only say "Sorry, I could not find the answer in the provided documents" if the context is completely irrelevant to the question.
+- Be helpful and informative while being honest about what you can and cannot determine from the context.
+- If you find partial information, share it and explain what aspects of the question remain unanswered.
+
+Please provide a clear, accurate answer based on the information provided in the context."""
 
     def _get_system_prompt(self) -> str:
         """Get improved system prompt for DeepSeek-V3"""
         return (
             "You are DocuMind AI Assistant, an expert document Q&A system. "
-            "Your job is to answer user questions using ONLY the provided context. "
-            "If the answer is not in the context, say so clearly.\n\n"
+            "Your job is to answer user questions using the provided context. "
+            "Be helpful and informative while being honest about limitations.\n\n"
             "Instructions:\n"
-            "- Use only the information from the provided context.\n"
+            "- Use the information from the provided context to answer questions.\n"
             "- Be concise, accurate, and professional.\n"
             "- If you cite information, mention the context number or snippet.\n"
-            "- If the answer is not found, reply: 'Sorry, I could not find the answer in the provided documents.'\n"
+            "- If the context contains relevant information (even if not a perfect match), provide what you can find.\n"
+            "- Only say 'Sorry, I could not find the answer in the provided documents' if the context is completely irrelevant to the question.\n"
+            "- If the context is somewhat related but doesn't fully answer the question, provide what you can and note any limitations.\n"
             "- Format your answer as HTML for best readability.\n"
-            "- Use <h3> for headings, <p> for paragraphs, <ul>/<ol> for lists, and <br> d by two <br>\n"
-            "- each paragraph should be separated by two new lines\n"
+            "- Use <h3> for headings, <p> for paragraphs, <ul>/<ol> for lists, and <br> for line breaks.\n"
+            "- Each paragraph should be separated by two new lines.\n"
             "Context will be provided below.\n"
         )
 

@@ -58,6 +58,27 @@ async def upload_document(
         logging.info(
             f"Received upload: filename={file.filename}, content_type={file.content_type}"
         )
+
+        # Check if user already has a document
+        existing_documents = (
+            db.query(Document).filter(Document.user_id == current_user.id).all()
+        )
+
+        if existing_documents:
+            existing_doc = existing_documents[0]  # Get the first document
+            return {
+                "success": False,
+                "error": "DOCUMENT_EXISTS",
+                "message": f"You already have a document uploaded: '{existing_doc.filename}'. Please delete it first before uploading a new document.",
+                "existing_document": {
+                    "id": existing_doc.id,
+                    "filename": existing_doc.filename,
+                    "file_type": existing_doc.file_type,
+                    "file_size": existing_doc.file_size,
+                    "created_at": existing_doc.created_at.isoformat(),
+                },
+            }
+
         # Read file content ONCE
         file_content = await file.read()
         file_ext = os.path.splitext(file.filename)[1].lower()
@@ -121,6 +142,116 @@ async def upload_document(
         db.rollback()
         logging.error(f"Upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@router.post("/upload/replace")
+async def replace_document(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Replace existing document with a new one"""
+    try:
+        logging.info(
+            f"Received document replacement: filename={file.filename}, content_type={file.content_type}"
+        )
+
+        # Check if user has an existing document
+        existing_documents = (
+            db.query(Document).filter(Document.user_id == current_user.id).all()
+        )
+
+        if not existing_documents:
+            raise HTTPException(
+                status_code=400,
+                detail="No existing document found to replace. Please use the regular upload endpoint.",
+            )
+
+        existing_doc = existing_documents[0]
+        logging.info(f"Replacing existing document: {existing_doc.filename}")
+
+        # Delete existing document and its chunks
+        success = document_processor.delete_document_chunks(existing_doc.id, db)
+        if not success:
+            raise HTTPException(
+                status_code=500, detail="Failed to delete existing document chunks"
+            )
+
+        # Delete the document record
+        db.delete(existing_doc)
+        db.commit()
+
+        logging.info(f"Successfully deleted existing document: {existing_doc.filename}")
+
+        # Now proceed with the new upload
+        file_content = await file.read()
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        logging.info(f"File extension: {file_ext}, size={len(file_content)} bytes")
+
+        # Process the file content
+        processing_result = document_processor.process_document_bytes(
+            file_content, file_ext, current_user.id, file.filename, db
+        )
+        logging.info(f"Processing result: {processing_result}")
+        if "error" in processing_result:
+            logging.error(f"Processing error: {processing_result['error']}")
+            raise HTTPException(status_code=400, detail=processing_result["error"])
+
+        # Upload to Cloudinary for storage/reference
+        cloudinary_url = None
+        cloudinary_public_id = None
+        if settings.use_cloudinary and cloudinary_service.is_available():
+            logging.info("Uploading to Cloudinary for storage/reference.")
+            upload_result = cloudinary_service.upload_file(
+                file_content, file.filename, file_ext
+            )
+            logging.info(f"Cloudinary upload_result: {upload_result}")
+            if "error" in upload_result:
+                logging.error(f"Cloudinary upload error: {upload_result['error']}")
+                raise HTTPException(status_code=500, detail=upload_result["error"])
+            cloudinary_url = upload_result["url"]
+            cloudinary_public_id = upload_result["public_id"]
+
+        # Save new document record
+        document_id = document_processor.save_document_record(
+            user_id=current_user.id,
+            filename=file.filename,
+            file_size=len(file_content),
+            file_type=file_ext,
+            db=db,
+            cloudinary_url=cloudinary_url,
+            cloudinary_public_id=cloudinary_public_id,
+            chunks=processing_result.get("chunks", []),
+        )
+
+        return {
+            "success": True,
+            "document_id": document_id,
+            "filename": file.filename,
+            "chunks_created": len(processing_result.get("chunks", [])),
+            "total_chunks": len(processing_result.get("chunks", [])),
+            "file_size": len(file_content),
+            "status": "processed",
+            "storage_type": (
+                "cloudinary"
+                if settings.use_cloudinary and cloudinary_service.is_available()
+                else "local"
+            ),
+            "cloudinary_url": cloudinary_url,
+            "replaced_document": {
+                "id": existing_doc.id,
+                "filename": existing_doc.filename,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Document replacement failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Document replacement failed: {str(e)}"
+        )
 
 
 @router.post("/ask")
@@ -283,7 +414,11 @@ async def delete_document(
             os.remove(document.file_path)
 
         # Delete document chunks and embeddings
-        document_processor.delete_document_chunks(document_id, db)
+        success = document_processor.delete_document_chunks(document_id, db)
+        if not success:
+            raise HTTPException(
+                status_code=500, detail="Failed to delete document chunks"
+            )
 
         # Delete document
         db.delete(document)

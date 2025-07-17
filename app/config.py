@@ -39,7 +39,9 @@ class Settings(BaseSettings):
     # AI Services
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4"
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_model: str = (
+        "sentence-transformers/all-MiniLM-L6-v2"  # Keep original model
+    )
     huggingface_api_key: Optional[str] = None
 
     # Processing
