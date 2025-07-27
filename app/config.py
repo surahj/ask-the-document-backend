@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     # File upload
     upload_dir: str = "./uploads"
-    max_file_size: int = 50 * 1024 * 1024  # 50MB in bytes
+    max_file_size: int = 10 * 1024 * 1024  # 10MB in bytes
     allowed_extensions: list = [".pdf", ".docx", ".txt", ".md"]
 
     # Cloudinary Configuration
@@ -40,9 +40,13 @@ class Settings(BaseSettings):
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4"
     embedding_model: str = (
-        "sentence-transformers/all-MiniLM-L6-v2"  # Keep original model
+        "BAAI/bge-small-en-v1.5"  # Working model with Hugging Face Inference API
     )
     huggingface_api_key: Optional[str] = None
+    huggingface_embedding_model: Optional[str] = (
+        None  # Add this field to match the env var
+    )
+    llm_model: str = "deepseek-ai/DeepSeek-V3"  # Single reliable LLM model
 
     # Processing
     chunk_size: int = 1000
@@ -52,7 +56,7 @@ class Settings(BaseSettings):
     # Vector Search
     top_k_results: int = 5
     similarity_threshold: float = 0.1  # Lower threshold for testing
-    embedding_dimension: int = 384  # For all-MiniLM-L6-v2
+    embedding_dimension: int = 384  # For BAAI/bge-small-en-v1.5
     vector_index_lists: int = 100  # For IVFFlat index
 
     # Performance

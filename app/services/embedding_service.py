@@ -19,13 +19,16 @@ class EmbeddingService:
     """Embedding service for text vectorization and semantic search using SQLite"""
 
     def __init__(self):
-        self.model_name = settings.embedding_model
+        # Use the Hugging Face specific model if set, otherwise use the default
+        self.model_name = (
+            settings.huggingface_embedding_model or settings.embedding_model
+        )
         self.hf_api_key = settings.huggingface_api_key
         self.similarity_threshold = (
             0.005  # Very low threshold to capture more relevant chunks
         )
         print(
-            f"[DEBUG] EmbeddingService initialized with similarity_threshold={self.similarity_threshold}"
+            f"[DEBUG] EmbeddingService initialized with model={self.model_name}, similarity_threshold={self.similarity_threshold}"
         )
         self.top_k = settings.top_k_results
         self.embedding_dimension = settings.embedding_dimension or 384
@@ -40,13 +43,13 @@ class EmbeddingService:
         # texts: str or List[str]
         data = texts if isinstance(texts, list) else [texts]
         try:
-            # For sentence-transformers models, we need to use a different format
+            # Use different format for sentence-transformers models
             if "sentence-transformers" in self.model_name:
-                # Use the feature-extraction endpoint for sentence-transformers
+                # Sentence-transformers require 'sentences' parameter
                 response = requests.post(
                     self.hf_api_url,
                     headers=self._hf_headers(),
-                    json={"inputs": data},
+                    json={"sentences": data},
                     timeout=30,
                 )
             else:
@@ -58,7 +61,17 @@ class EmbeddingService:
                     timeout=30,
                 )
 
-            response.raise_for_status()
+            # Log the response for debugging
+            if response.status_code != 200:
+                print(f"API Response Status: {response.status_code}")
+                print(f"API Response Headers: {dict(response.headers)}")
+                try:
+                    error_detail = response.json()
+                    print(f"API Error Detail: {error_detail}")
+                except:
+                    print(f"API Error Text: {response.text}")
+                response.raise_for_status()
+
             result = response.json()
 
             # Handle different response formats

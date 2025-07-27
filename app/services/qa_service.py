@@ -49,6 +49,103 @@ class QuestionAnsweringService:
                     "processing_time": time.time() - start_time,
                 }
 
+            # Check if user has any documents and their processing status
+            user_documents = (
+                db.query(Document).filter(Document.user_id == user_id).all()
+            )
+
+            if not user_documents:
+                return {
+                    "error": "No documents found. Please upload a document first.",
+                    "processing_time": time.time() - start_time,
+                }
+
+            # Check if any documents are still processing
+            processing_documents = [
+                doc
+                for doc in user_documents
+                if doc.status in ["uploaded", "processing"]
+            ]
+
+            if processing_documents:
+                processing_doc = processing_documents[0]
+
+                # Get detailed processing information
+                chunks_with_embeddings = (
+                    db.query(DocumentChunk)
+                    .filter(
+                        DocumentChunk.document_id == processing_doc.id,
+                        DocumentChunk.embedding.isnot(None),
+                    )
+                    .count()
+                )
+
+                total_chunks = (
+                    db.query(DocumentChunk)
+                    .filter(DocumentChunk.document_id == processing_doc.id)
+                    .count()
+                )
+
+                # Determine processing phase and create detailed message
+                if processing_doc.status == "uploaded":
+                    processing_phase = "text extraction and chunking"
+                    progress_info = "Document is being prepared for AI processing"
+                elif processing_doc.status == "processing":
+                    if total_chunks == 0:
+                        processing_phase = "text extraction and chunking"
+                        progress_info = "Document is being prepared for AI processing"
+                    else:
+                        processing_phase = "embedding creation"
+                        progress_percentage = (
+                            (chunks_with_embeddings / total_chunks * 100)
+                            if total_chunks > 0
+                            else 0
+                        )
+                        progress_info = f"Creating AI embeddings... ({chunks_with_embeddings}/{total_chunks} completed - {progress_percentage:.1f}%)"
+                else:
+                    processing_phase = "processing"
+                    progress_info = "Document is being processed"
+
+                return {
+                    "error": f"Document '{processing_doc.filename}' is still being processed. {progress_info}. Please wait for processing to complete before asking questions.",
+                    "processing_status": "document_processing",
+                    "document_id": processing_doc.id,
+                    "processing_phase": processing_phase,
+                    "progress_info": progress_info,
+                    "chunks_with_embeddings": chunks_with_embeddings,
+                    "total_chunks": total_chunks,
+                    "progress_percentage": (
+                        (chunks_with_embeddings / total_chunks * 100)
+                        if total_chunks > 0
+                        else 0
+                    ),
+                    "estimated_time": (
+                        "1-2 minutes"
+                        if processing_doc.status == "uploaded"
+                        else "30-60 seconds"
+                    ),
+                    "processing_time": time.time() - start_time,
+                }
+
+            # Check if any documents have errors
+            error_documents = [doc for doc in user_documents if doc.status == "error"]
+
+            if error_documents:
+                error_doc = error_documents[0]
+                return {
+                    "error": f"Document '{error_doc.filename}' encountered an error during processing. The document may be corrupted, too large, or in an unsupported format. Please try uploading the document again or contact support if the issue persists.",
+                    "processing_status": "document_error",
+                    "document_id": error_doc.id,
+                    "suggestions": [
+                        "Try uploading the document again",
+                        "Check if the file is corrupted",
+                        "Ensure the file is under 10MB",
+                        "Verify the file format is supported (PDF, DOCX, TXT, MD)",
+                        "Contact support if the issue persists",
+                    ],
+                    "processing_time": time.time() - start_time,
+                }
+
             # Create embedding for question
             question_embedding = self.embedding_service.create_embedding(question)
             print(

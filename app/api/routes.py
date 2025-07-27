@@ -4,8 +4,17 @@ API routes for DocuMind AI Assistant with PostgreSQL pgvector support
 
 import os
 import shutil
+import asyncio
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    UploadFile,
+    File,
+    Form,
+    Query,
+)
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
@@ -19,6 +28,7 @@ from app.services import (
     QuestionAnsweringService,
 )
 from app.services.cloudinary_service import CloudinaryService
+from app.services.background_tasks import process_document_background_task
 from app.config import settings
 import math
 import pprint
@@ -84,15 +94,6 @@ async def upload_document(
         file_ext = os.path.splitext(file.filename)[1].lower()
         logging.info(f"File extension: {file_ext}, size={len(file_content)} bytes")
 
-        # Process the file content directly (extract text, chunk, embed, etc.)
-        processing_result = document_processor.process_document_bytes(
-            file_content, file_ext, current_user.id, file.filename, db
-        )
-        logging.info(f"Processing result: {processing_result}")
-        if "error" in processing_result:
-            logging.error(f"Processing error: {processing_result['error']}")
-            raise HTTPException(status_code=400, detail=processing_result["error"])
-
         # Upload to Cloudinary for storage/reference
         cloudinary_url = None
         cloudinary_public_id = None
@@ -108,8 +109,11 @@ async def upload_document(
             cloudinary_url = upload_result["url"]
             cloudinary_public_id = upload_result["public_id"]
 
-        # Save document record with Cloudinary URL (if available)
-        document_id = document_processor.save_document_record(
+        # Save document record immediately (without processing)
+        logging.info(
+            "Saving document record to database (processing will happen in background)..."
+        )
+        document_id = document_processor.save_document_record_async(
             user_id=current_user.id,
             filename=file.filename,
             file_size=len(file_content),
@@ -117,17 +121,45 @@ async def upload_document(
             db=db,
             cloudinary_url=cloudinary_url,
             cloudinary_public_id=cloudinary_public_id,
-            chunks=processing_result.get("chunks", []),
+            chunks=[],  # No chunks yet - will be created in background
+        )
+
+        # Ensure document is committed before starting background task
+        await asyncio.sleep(0.1)
+
+        # Create truly async background task for complete document processing
+        logging.info(
+            f"Starting background document processing for document {document_id}"
+        )
+        task = asyncio.create_task(
+            process_document_background_task(
+                document_id,
+                file_content,
+                file_ext,
+                file.filename,
+                current_user.id,
+                len(file_content),
+                cloudinary_url,
+                cloudinary_public_id,
+            )
+        )
+        logging.info(
+            f"Created truly async background task for complete document processing (document {document_id})"
+        )
+
+        logging.info(
+            f"Document upload completed successfully. Document ID: {document_id} (processing in background)"
         )
 
         return {
             "success": True,
             "document_id": document_id,
             "filename": file.filename,
-            "chunks_created": len(processing_result.get("chunks", [])),
-            "total_chunks": len(processing_result.get("chunks", [])),
+            "chunks_created": 0,  # Will be updated as processing progresses
+            "total_chunks": 0,  # Will be updated as processing progresses
             "file_size": len(file_content),
-            "status": "processed",
+            "status": "uploaded",  # Document is uploaded but processing is still happening
+            "processing_status": "document_processing",  # New field to indicate background processing
             "storage_type": (
                 "cloudinary"
                 if settings.use_cloudinary and cloudinary_service.is_available()
@@ -171,6 +203,7 @@ async def replace_document(
         logging.info(f"Replacing existing document: {existing_doc.filename}")
 
         # Delete existing document and its chunks
+        logging.info("Deleting existing document chunks...")
         success = document_processor.delete_document_chunks(existing_doc.id, db)
         if not success:
             raise HTTPException(
@@ -188,15 +221,6 @@ async def replace_document(
         file_ext = os.path.splitext(file.filename)[1].lower()
         logging.info(f"File extension: {file_ext}, size={len(file_content)} bytes")
 
-        # Process the file content
-        processing_result = document_processor.process_document_bytes(
-            file_content, file_ext, current_user.id, file.filename, db
-        )
-        logging.info(f"Processing result: {processing_result}")
-        if "error" in processing_result:
-            logging.error(f"Processing error: {processing_result['error']}")
-            raise HTTPException(status_code=400, detail=processing_result["error"])
-
         # Upload to Cloudinary for storage/reference
         cloudinary_url = None
         cloudinary_public_id = None
@@ -212,8 +236,11 @@ async def replace_document(
             cloudinary_url = upload_result["url"]
             cloudinary_public_id = upload_result["public_id"]
 
-        # Save new document record
-        document_id = document_processor.save_document_record(
+        # Save new document record immediately (without processing)
+        logging.info(
+            "Saving new document record to database (processing will happen in background)..."
+        )
+        document_id = document_processor.save_document_record_async(
             user_id=current_user.id,
             filename=file.filename,
             file_size=len(file_content),
@@ -221,17 +248,45 @@ async def replace_document(
             db=db,
             cloudinary_url=cloudinary_url,
             cloudinary_public_id=cloudinary_public_id,
-            chunks=processing_result.get("chunks", []),
+            chunks=[],  # No chunks yet - will be created in background
+        )
+
+        # Ensure document is committed before starting background task
+        await asyncio.sleep(0.1)
+
+        # Create truly async background task for complete document processing
+        logging.info(
+            f"Starting background document processing for document {document_id}"
+        )
+        task = asyncio.create_task(
+            process_document_background_task(
+                document_id,
+                file_content,
+                file_ext,
+                file.filename,
+                current_user.id,
+                len(file_content),
+                cloudinary_url,
+                cloudinary_public_id,
+            )
+        )
+        logging.info(
+            f"Created truly async background task for complete document processing (document {document_id})"
+        )
+
+        logging.info(
+            f"Document replacement completed successfully. Document ID: {document_id} (processing in background)"
         )
 
         return {
             "success": True,
             "document_id": document_id,
             "filename": file.filename,
-            "chunks_created": len(processing_result.get("chunks", [])),
-            "total_chunks": len(processing_result.get("chunks", [])),
+            "chunks_created": 0,  # Will be updated as processing progresses
+            "total_chunks": 0,  # Will be updated as processing progresses
             "file_size": len(file_content),
-            "status": "processed",
+            "status": "uploaded",  # Document is uploaded but processing is still happening
+            "processing_status": "document_processing",  # New field to indicate background processing
             "storage_type": (
                 "cloudinary"
                 if settings.use_cloudinary and cloudinary_service.is_available()
@@ -269,7 +324,6 @@ async def ask_question(
             raise HTTPException(status_code=400, detail=result["error"])
 
         sanitized = sanitize_json(result)
-        pprint.pprint(sanitized)
         return sanitized
 
     except HTTPException:
@@ -576,4 +630,86 @@ async def get_system_stats(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to retrieve stats: {str(e)}"
+        )
+
+
+@router.get("/documents/{document_id}/status")
+async def get_document_status(
+    document_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Get document processing status"""
+    try:
+        # Get document
+        document = (
+            db.query(Document)
+            .filter(
+                Document.id == document_id,
+                Document.user_id == current_user.id,
+            )
+            .first()
+        )
+
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        # Count chunks with embeddings
+        chunks_with_embeddings = (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.document_id == document_id,
+                DocumentChunk.embedding.isnot(None),
+            )
+            .count()
+        )
+
+        total_chunks = (
+            db.query(DocumentChunk)
+            .filter(DocumentChunk.document_id == document_id)
+            .count()
+        )
+
+        # Determine processing status
+        if document.status == "uploaded":
+            processing_status = "document_processing"
+            message = f"Document uploaded successfully. Processing document (text extraction and chunking)..."
+        elif document.status == "processing":
+            if total_chunks == 0:
+                processing_status = "document_processing"
+                message = f"Processing document (text extraction and chunking)..."
+            else:
+                processing_status = "embeddings_processing"
+                message = f"Creating embeddings... ({chunks_with_embeddings}/{total_chunks} completed)"
+        elif document.status == "processed":
+            processing_status = "ready"
+            message = "Document is ready for questions!"
+        elif document.status == "error":
+            processing_status = "error"
+            message = "Error occurred during processing. Please try uploading again."
+        else:
+            processing_status = "unknown"
+            message = "Unknown processing status"
+
+        return {
+            "document_id": document.id,
+            "filename": document.filename,
+            "status": document.status,
+            "processing_status": processing_status,
+            "message": message,
+            "chunks_with_embeddings": chunks_with_embeddings,
+            "total_chunks": total_chunks,
+            "progress_percentage": (
+                (chunks_with_embeddings / total_chunks * 100) if total_chunks > 0 else 0
+            ),
+            "created_at": document.created_at.isoformat(),
+            "updated_at": document.updated_at.isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error getting document status: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get document status: {str(e)}"
         )

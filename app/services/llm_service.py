@@ -16,19 +16,36 @@ class LLMService:
     """LLM service for answer generation using DeepSeek-V3 via Hugging Face InferenceClient (fireworks-ai)"""
 
     def __init__(self):
-        self.model = "deepseek-ai/DeepSeek-V3"
+        self.model = settings.llm_model
         self.api_key = settings.huggingface_api_key
-        self.client = InferenceClient(
-            provider="fireworks-ai",
-            api_key=self.api_key,
-        )
+
+        if not self.api_key:
+            print("[LLMService] Warning: No Hugging Face API key configured")
+            self.client = None
+        else:
+            try:
+                self.client = InferenceClient(
+                    provider="fireworks-ai",
+                    api_key=self.api_key,
+                )
+                print(f"[LLMService] Initialized with model: {self.model}")
+            except Exception as e:
+                print(f"[LLMService] Error initializing client: {e}")
+                self.client = None
 
     def generate_answer(
         self, question: str, context_chunks: List[str], sources: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
+        if not self.client:
+            print("[LLMService] No client available, using fallback response")
+            return self._generate_mock_answer(
+                question, context_chunks, sources, error="No LLM client available"
+            )
+
         prompt = self._create_prompt(question, self._prepare_context(context_chunks))
         system_prompt = self._get_system_prompt()
         try:
+            print(f"[LLMService] Generating answer for question: {question[:50]}...")
             # Use the InferenceClient for text generation
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -38,6 +55,9 @@ class LLMService:
                 ],
             )
             answer = response.choices[0].message.content
+            print(
+                f"[LLMService] Successfully generated answer ({len(answer)} characters)"
+            )
 
             confidence = self._sanitize_float(
                 self._calculate_confidence(answer, sources)
