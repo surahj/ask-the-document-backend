@@ -363,6 +363,7 @@ class DocumentProcessor:
         """Save document and chunks to DB, including Cloudinary URL if provided"""
         from app.models import Document, DocumentChunk
         import numpy as np
+        import logging
 
         try:
             document = Document(
@@ -379,6 +380,12 @@ class DocumentProcessor:
 
             # Save chunks and create embeddings
             if chunks:
+                logging.info(
+                    f"Processing {len(chunks)} chunks for document {document.id}"
+                )
+
+                # First, create all chunk records without embeddings
+                chunk_records = []
                 for chunk_data in chunks:
                     chunk = DocumentChunk(
                         document_id=document.id,
@@ -388,26 +395,97 @@ class DocumentProcessor:
                         end_position=chunk_data["end_position"],
                     )
                     db.add(chunk)
-                    db.flush()  # Get chunk.id
+                    chunk_records.append(chunk)
 
-                    # Create and store embedding
-                    embedding = self.embedding_service.create_embedding(
-                        chunk_data["content"]
-                    )
+                # Flush to get all chunk IDs
+                db.flush()
+
+                # Extract all chunk contents for batch embedding creation
+                chunk_contents = [chunk_data["content"] for chunk_data in chunks]
+
+                # Create embeddings in batch (much faster than individual calls)
+                logging.info(
+                    f"Creating batch embeddings for {len(chunk_contents)} chunks"
+                )
+                embeddings = self.embedding_service.batch_create_embeddings(
+                    chunk_contents
+                )
+
+                # Assign embeddings to chunks
+                successful_embeddings = 0
+                for i, (chunk, embedding) in enumerate(zip(chunk_records, embeddings)):
                     if embedding:
                         # Store embedding directly as list for PostgreSQL VECTOR type
                         chunk.embedding = embedding
+                        successful_embeddings += 1
                     else:
-                        print(
-                            f"Warning: Failed to create embedding for chunk {chunk_data['chunk_index']}"
+                        logging.warning(
+                            f"Failed to create embedding for chunk {chunks[i]['chunk_index']}"
                         )
+
+                logging.info(
+                    f"Successfully created {successful_embeddings}/{len(chunks)} embeddings"
+                )
 
             db.commit()
             return document.id
         except Exception as e:
             db.rollback()
-            import logging
+            logging.error(f"Failed to save document record: {e}")
+            raise
 
+    def save_document_record_async(
+        self,
+        user_id: int,
+        filename: str,
+        file_size: int,
+        file_type: str,
+        db: Session,
+        cloudinary_url: Optional[str] = None,
+        cloudinary_public_id: Optional[str] = None,
+        chunks: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
+        """Save document and chunks to DB without creating embeddings (for async processing)"""
+        from app.models import Document, DocumentChunk
+        import logging
+
+        try:
+            document = Document(
+                user_id=user_id,
+                filename=filename,
+                file_size=file_size,
+                file_type=file_type,
+                status="uploaded",  # Start with uploaded status
+                cloudinary_url=cloudinary_url,
+                cloudinary_public_id=cloudinary_public_id,
+            )
+            db.add(document)
+            db.flush()  # Get document.id
+
+            # Save chunks without embeddings (embeddings will be created asynchronously)
+            if chunks:
+                logging.info(
+                    f"Saving {len(chunks)} chunks for document {document.id} (embeddings will be created asynchronously)"
+                )
+
+                for chunk_data in chunks:
+                    chunk = DocumentChunk(
+                        document_id=document.id,
+                        chunk_index=chunk_data["chunk_index"],
+                        content=chunk_data["content"],
+                        start_position=chunk_data["start_position"],
+                        end_position=chunk_data["end_position"],
+                        # embedding will be None initially
+                    )
+                    db.add(chunk)
+
+            db.commit()
+            logging.info(
+                f"Document {document.id} saved successfully (status: uploaded)"
+            )
+            return document.id
+        except Exception as e:
+            db.rollback()
             logging.error(f"Failed to save document record: {e}")
             raise
 
@@ -415,6 +493,8 @@ class DocumentProcessor:
         self, file_path: str, user_id: int, filename: str, db: Session
     ) -> Dict[str, Any]:
         """Process document and store with embeddings in database"""
+        import logging
+
         try:
             # Check if document with same filename already exists for this user
             existing_doc = (
@@ -445,10 +525,13 @@ class DocumentProcessor:
             db.add(document)
             db.flush()  # Get the document ID
 
-            # Create chunks and embeddings
-            chunks_created = 0
-            for chunk_data in result["chunks"]:
-                # Create chunk record
+            # Create chunks and embeddings using batch processing
+            chunks = result["chunks"]
+            logging.info(f"Processing {len(chunks)} chunks for document {document.id}")
+
+            # First, create all chunk records without embeddings
+            chunk_records = []
+            for chunk_data in chunks:
                 chunk = DocumentChunk(
                     document_id=document.id,
                     chunk_index=chunk_data["chunk_index"],
@@ -457,20 +540,33 @@ class DocumentProcessor:
                     end_position=chunk_data["end_position"],
                 )
                 db.add(chunk)
-                db.flush()  # Get the chunk ID
+                chunk_records.append(chunk)
 
-                # Create and store embedding
-                embedding = self.embedding_service.create_embedding(
-                    chunk_data["content"]
-                )
+            # Flush to get all chunk IDs
+            db.flush()
+
+            # Extract all chunk contents for batch embedding creation
+            chunk_contents = [chunk_data["content"] for chunk_data in chunks]
+
+            # Create embeddings in batch (much faster than individual calls)
+            logging.info(f"Creating batch embeddings for {len(chunk_contents)} chunks")
+            embeddings = self.embedding_service.batch_create_embeddings(chunk_contents)
+
+            # Assign embeddings to chunks
+            chunks_created = 0
+            for i, (chunk, embedding) in enumerate(zip(chunk_records, embeddings)):
                 if embedding:
                     # Store embedding directly as list for PostgreSQL VECTOR type
                     chunk.embedding = embedding
                     chunks_created += 1
                 else:
-                    print(
-                        f"Warning: Failed to create embedding for chunk {chunk_data['chunk_index']}"
+                    logging.warning(
+                        f"Failed to create embedding for chunk {chunks[i]['chunk_index']}"
                     )
+
+            logging.info(
+                f"Successfully created {chunks_created}/{len(chunks)} embeddings"
+            )
 
             # Update document status
             document.status = "processed"
@@ -479,7 +575,7 @@ class DocumentProcessor:
             return {
                 "document_id": document.id,
                 "chunks_created": chunks_created,
-                "total_chunks": len(result["chunks"]),
+                "total_chunks": len(chunks),
                 "file_info": result["file_info"],
                 "status": "processed",
             }
@@ -499,6 +595,8 @@ class DocumentProcessor:
         db: Session,
     ) -> Dict[str, Any]:
         """Process document from Cloudinary URL and store with embeddings in database"""
+        import logging
+
         try:
             # Check if document with same filename already exists for this user
             existing_doc = (
@@ -535,10 +633,12 @@ class DocumentProcessor:
             db.add(document)
             db.flush()  # Get the document ID
 
-            # Create chunks and embeddings
-            chunks_created = 0
+            # Create chunks and embeddings using batch processing
+            logging.info(f"Processing {len(chunks)} chunks for document {document.id}")
+
+            # First, create all chunk records without embeddings
+            chunk_records = []
             for chunk_data in chunks:
-                # Create chunk record
                 chunk = DocumentChunk(
                     document_id=document.id,
                     chunk_index=chunk_data["chunk_index"],
@@ -547,20 +647,33 @@ class DocumentProcessor:
                     end_position=chunk_data["end_position"],
                 )
                 db.add(chunk)
-                db.flush()  # Get the chunk ID
+                chunk_records.append(chunk)
 
-                # Create and store embedding
-                embedding = self.embedding_service.create_embedding(
-                    chunk_data["content"]
-                )
+            # Flush to get all chunk IDs
+            db.flush()
+
+            # Extract all chunk contents for batch embedding creation
+            chunk_contents = [chunk_data["content"] for chunk_data in chunks]
+
+            # Create embeddings in batch (much faster than individual calls)
+            logging.info(f"Creating batch embeddings for {len(chunk_contents)} chunks")
+            embeddings = self.embedding_service.batch_create_embeddings(chunk_contents)
+
+            # Assign embeddings to chunks
+            chunks_created = 0
+            for i, (chunk, embedding) in enumerate(zip(chunk_records, embeddings)):
                 if embedding:
                     # Store embedding directly as list for PostgreSQL VECTOR type
                     chunk.embedding = embedding
                     chunks_created += 1
                 else:
-                    print(
-                        f"Warning: Failed to create embedding for chunk {chunk_data['chunk_index']}"
+                    logging.warning(
+                        f"Failed to create embedding for chunk {chunks[i]['chunk_index']}"
                     )
+
+            logging.info(
+                f"Successfully created {chunks_created}/{len(chunks)} embeddings"
+            )
 
             # Update document status
             document.status = "processed"
